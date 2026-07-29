@@ -330,70 +330,70 @@ export async function sendMessageToConversation(
   }
 
   const attempt = async (phone: string): Promise<string> => {
-    if (messageType === 'template') {
-      const result = await sendTemplateMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
-        to: phone,
-        templateName: templateName!,
-        language: templateLanguage || 'en_US',
-        template: templateRow ?? undefined,
-        messageParams: templateMessageParams ?? undefined,
-        params: templateParams || [],
-        contextMessageId,
-      });
-      return result.messageId;
+  const apiKey = process.env.YCLOUD_API_KEY!
+  const from = process.env.WHATSAPP_PHONE_NUMBER!
+
+  const baseBody: Record<string, unknown> = {
+    from,
+    to: phone,
+    type: messageType,
+  }
+
+  if (messageType === 'text') {
+    baseBody.text = { body: contentText! }
+  } else if (messageType === 'template') {
+    baseBody.type = 'template'
+    baseBody.template = {
+      name: templateName!,
+      language: { code: templateLanguage || 'es' },
     }
-    if (isMediaKind) {
-      const result = await sendMediaMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
-        to: phone,
-        kind: messageType as MediaKind,
-        link: mediaUrl!,
-        caption: contentText || undefined,
-        filename: filename || undefined,
-        contextMessageId,
-      });
-      return result.messageId;
+  } else if (isMediaKind) {
+    baseBody[messageType] = { link: mediaUrl! }
+    if (contentText && messageType !== 'audio') {
+      (baseBody[messageType] as Record<string, unknown>).caption = contentText
     }
-    if (messageType === 'interactive') {
-      const p = interactivePayload!;
-      if (p.kind === 'buttons') {
-        const result = await sendInteractiveButtons({
-          phoneNumberId: config.phone_number_id,
-          accessToken,
-          to: phone,
-          bodyText: p.body,
-          headerText: p.header || undefined,
-          footerText: p.footer || undefined,
-          buttons: p.buttons,
-          contextMessageId,
-        });
-        return result.messageId;
+  } else if (messageType === 'interactive') {
+    const p = interactivePayload!
+    if (p.kind === 'buttons') {
+      baseBody.interactive = {
+        type: 'button',
+        body: { text: p.body },
+        action: {
+          buttons: p.buttons.map((b) => ({
+            type: 'reply',
+            reply: { id: b.id, title: b.title },
+          })),
+        },
       }
-      const result = await sendInteractiveList({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
-        to: phone,
-        bodyText: p.body,
-        buttonLabel: p.button_label,
-        headerText: p.header || undefined,
-        footerText: p.footer || undefined,
-        sections: p.sections,
-        contextMessageId,
-      });
-      return result.messageId;
+    } else {
+      baseBody.interactive = {
+        type: 'list',
+        body: { text: p.body },
+        action: {
+          button: p.button_label,
+          sections: p.sections,
+        },
+      }
     }
-    const result = await sendTextMessage({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
-      to: phone,
-      text: contentText!,
-      contextMessageId,
-    });
-    return result.messageId;
-  };
+  }
+
+  const res = await fetch('https://api.ycloud.com/v2/whatsapp/messages/sendDirectly', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-Key': apiKey,
+    },
+    body: JSON.stringify(baseBody),
+  })
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err?.message ?? `YCloud API error: ${res.status}`)
+  }
+
+  const data = await res.json()
+  return data.wamid ?? data.id ?? ''
+}
 
   // Send via Meta — retry across phone-number variants if Meta rejects
   // with "recipient not in allowed list"; persist a working variant
@@ -427,7 +427,7 @@ export async function sendMessageToConversation(
     const message =
       err instanceof Error ? err.message : 'Unknown Meta API error';
     console.error('[send-message] Meta send failed for all variants:', message);
-    throw new SendMessageError('meta_error', `Meta API error: ${message}`, 502);
+    throw new SendMessageError('ycloud_error', `YCloud API error: ${message}`, 502);
   }
 
   if (workingPhone !== sanitizedPhone) {

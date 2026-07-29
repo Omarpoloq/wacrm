@@ -4,7 +4,6 @@ import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
 import { normalizePhone } from '@/lib/whatsapp/phone-utils'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
-import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
@@ -87,108 +86,74 @@ interface WhatsAppWebhookEntry {
 }
 
 // GET - Webhook verification
-export async function GET(request: Request) {
-  try {
-    const { searchParams } = new URL(request.url)
-    const mode = searchParams.get('hub.mode')
-    const challenge = searchParams.get('hub.challenge')
-    const verifyToken = searchParams.get('hub.verify_token')
-
-    if (mode !== 'subscribe' || !challenge || !verifyToken) {
-      return NextResponse.json(
-        { error: 'Missing verification parameters' },
-        { status: 400 }
-      )
-    }
-
-    // Fetch all whatsapp configs to check verify tokens
-    const { data: configs, error: configError } = await supabaseAdmin()
-      .from('whatsapp_config')
-      .select('id, verify_token')
-
-    if (configError || !configs) {
-      console.error('Error fetching configs for verification:', configError)
-      return NextResponse.json(
-        { error: 'Verification failed' },
-        { status: 403 }
-      )
-    }
-
-    // Check if any config's verify_token matches. Also collect the
-    // matching row so we can opportunistically upgrade its token to
-    // GCM if it was still in the legacy CBC format.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let matchedConfig: any = null
-    for (const config of configs) {
-      if (!config.verify_token) continue
-      try {
-        if (decrypt(config.verify_token) === verifyToken) {
-          matchedConfig = config
-          break
-        }
-      } catch {
-        // Malformed / wrong-key token row — skip it and keep checking.
-      }
-    }
-
-    if (matchedConfig) {
-      // Fire-and-forget GCM upgrade. Safe to run on every subscribe
-      // since it's a no-op once the column is already GCM.
-      if (isLegacyFormat(matchedConfig.verify_token)) {
-        void supabaseAdmin()
-          .from('whatsapp_config')
-          .update({ verify_token: encrypt(verifyToken) })
-          .eq('id', matchedConfig.id)
-          .then(({ error }: { error: unknown }) => {
-            if (error) {
-              console.warn(
-                '[webhook] verify_token GCM upgrade failed:',
-                (error as { message?: string })?.message ?? error,
-              )
-            }
-          })
-      }
-      // Return challenge as plain text
-      return new Response(challenge, {
-        status: 200,
-        headers: { 'Content-Type': 'text/plain' },
-      })
-    }
-
-    return NextResponse.json(
-      { error: 'Verification token mismatch' },
-      { status: 403 }
-    )
-  } catch (error) {
-    console.error('Error in webhook GET verification:', error)
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    )
-  }
+export async function GET() {
+  return NextResponse.json({ ok: true })
 }
 
 // POST - Receive messages
 export async function POST(request: Request) {
   // Read raw body first so we can HMAC-verify the exact bytes Meta
   // signed. request.json() would re-encode and break the signature.
-  const rawBody = await request.text()
-  const signature = request.headers.get('x-hub-signature-256')
+const rawBody = await request.text()
+const sigHeader = request.headers.get('ycloud-signature') ?? ''
+const [tPart, sPart] = sigHeader.split(',')
+const timestamp = tPart?.replace('t=', '') ?? ''
+const receivedSig = sPart?.replace('s=', '') ?? ''
 
-  if (!verifyMetaWebhookSignature(rawBody, signature)) {
-    // 401 (not 200) — we want Meta's delivery dashboard to show failures
-    // loudly if a misconfiguration causes signatures to stop matching,
-    // rather than silently eating events.
-    console.warn('[webhook] rejected request with invalid signature')
-    return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
-  }
+const { createHmac } = await import('crypto')
+const secret = (process.env.YCLOUD_WEBHOOK_SECRET ?? '')
 
-  let body: { entry?: WhatsAppWebhookEntry[] }
-  try {
-    body = JSON.parse(rawBody)
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
+const expectedSig = createHmac('sha256', secret)
+  .update(`${timestamp}.${rawBody}`)
+  .digest('hex')
+
+if (!receivedSig || receivedSig !== expectedSig) {
+  console.warn('[webhook] rejected request with invalid signature')
+  return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
+}
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+let body: { entry?: WhatsAppWebhookEntry[]; type?: string; whatsappInboundMessage?: any }
+try {
+  body = JSON.parse(rawBody)
+} catch {
+  return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
+}
+
+if (body.type === 'whatsapp.inbound_message.received' && body.whatsappInboundMessage) {
+  const msg = body.whatsappInboundMessage
+  body = {
+    entry: [{
+      id: msg.wabaId ?? '',
+      changes: [{
+        field: 'messages',
+        value: {
+          messaging_product: 'whatsapp',
+          metadata: {
+            display_phone_number: msg.to,
+            phone_number_id: msg.to,
+          },
+          contacts: [{
+            profile: { name: msg.customerProfile?.name ?? msg.from },
+            wa_id: msg.from.replace('+', ''),
+          }],
+          messages: [{
+            id: msg.wamid,
+            from: msg.from.replace('+', ''),
+            timestamp: String(Math.floor(new Date(msg.sendTime).getTime() / 1000)),
+            type: msg.type,
+            text: msg.text ?? undefined,
+            image: msg.image ?? undefined,
+            audio: msg.audio ?? undefined,
+            video: msg.video ?? undefined,
+            document: msg.document ?? undefined,
+            location: msg.location ?? undefined,
+            interactive: msg.interactive ?? undefined,
+          }],
+        },
+      }],
+    }],
   }
+}
 
   // Process AFTER the response so we ack Meta within their ~20s timeout
   // (a slow ack triggers Meta retries + duplicate inserts), while still
@@ -253,9 +218,9 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
       // post-migration 013 (UNIQUE constraint), but a row created
       // before the constraint, or a race, would still surface here.
       const { data: configRows, error: configError } = await supabaseAdmin()
-        .from('whatsapp_config')
-        .select('*')
-        .eq('phone_number_id', phoneNumberId)
+  .from('whatsapp_config')
+  .select('*')
+  .or(`phone_number_id.eq.${phoneNumberId},phone_number.eq.${phoneNumberId}`)
 
       if (configError) {
         console.error(
