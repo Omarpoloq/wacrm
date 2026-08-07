@@ -143,16 +143,60 @@ async function processInstagramWebhook(body: any) {
       let contentText: string | null = text;
 
       if (attachments.length > 0) {
-        const firstAtt = attachments[0];
-        contentType = firstAtt.type || 'file';
-        const mediaId = firstAtt.payload?.id;
-        if (mediaId) {
-          mediaUrl = await getInstagramMediaUrl(mediaId);
+  const firstAtt = attachments[0];
+  contentType = firstAtt.type || 'file';
+  
+  // Mapear tipos de Instagram a tipos válidos
+  const typeMap: Record<string, string> = {
+    'ig_reel': 'video',
+    'ig_story': 'image',
+    'share': 'image',
+  }
+  contentType = typeMap[contentType] || contentType
+
+  const directUrl = firstAtt.payload?.url || null
+  const mediaId = firstAtt.payload?.id || null
+
+  if (directUrl) {
+    // Intentar descargar y subir a Storage
+    try {
+      const res = await fetch(directUrl)
+      if (res.ok) {
+        const buffer = Buffer.from(await res.arrayBuffer())
+        const contentTypeHeader = res.headers.get('content-type') || 'image/jpeg'
+        const mimeMap: Record<string, string> = {
+          'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
+          'video/mp4': 'mp4', 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3',
         }
-        if (firstAtt.payload?.caption) {
-          contentText = firstAtt.payload.caption;
+        const ext = mimeMap[contentTypeHeader] || 'bin'
+        const fileKey = mediaId || Date.now().toString()
+        const path = `instagram/${fileKey}.${ext}`
+
+        const { error: uploadError } = await supabaseAdmin()
+          .storage
+          .from('chat-media')
+          .upload(path, buffer, { contentType: contentTypeHeader, upsert: true })
+
+        if (!uploadError) {
+          const { data } = supabaseAdmin().storage.from('chat-media').getPublicUrl(path)
+          mediaUrl = data.publicUrl
+        } else {
+          console.error('[Instagram] Error subiendo media:', uploadError)
+          mediaUrl = directUrl // fallback
         }
       }
+    } catch (err) {
+      console.error('[Instagram] Error descargando media:', err)
+      mediaUrl = directUrl // fallback
+    }
+  } else if (mediaId) {
+    mediaUrl = await getInstagramMediaUrl(mediaId)
+  }
+
+  if (firstAtt.payload?.caption) {
+    contentText = firstAtt.payload.caption;
+  }
+}
 
       // 5. Insertar mensaje
       const { error: msgError } = await supabaseAdmin()

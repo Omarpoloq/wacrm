@@ -121,6 +121,7 @@ try {
 
 if (body.type === 'whatsapp.inbound_message.received' && body.whatsappInboundMessage) {
   const msg = body.whatsappInboundMessage
+   console.log('[YCloud] payload completo:', JSON.stringify(msg, null, 2))
   body = {
     entry: [{
       id: msg.wabaId ?? '',
@@ -142,10 +143,10 @@ if (body.type === 'whatsapp.inbound_message.received' && body.whatsappInboundMes
             timestamp: String(Math.floor(new Date(msg.sendTime).getTime() / 1000)),
             type: msg.type,
             text: msg.text ?? undefined,
-            image: msg.image ?? undefined,
-            audio: msg.audio ?? undefined,
-            video: msg.video ?? undefined,
-            document: msg.document ?? undefined,
+            image: msg.image ? { ...msg.image, id: msg.image.link } : undefined,
+            audio: msg.audio ? { ...msg.audio, id: msg.audio.link } : undefined,
+            video: msg.video ? { ...msg.video, id: msg.video.link } : undefined,
+            document: msg.document ? { ...msg.document, id: msg.document.link } : undefined,
             location: msg.location ?? undefined,
             interactive: msg.interactive ?? undefined,
           }],
@@ -811,20 +812,72 @@ async function parseMessageContent(
   // the args swapped, so every verification hit an invalid Meta URL and
   // fell through to the catch block, leaving mediaUrl as null. That's
   // why images showed up as empty bubbles in the inbox.
-  const verifyAndBuildUrl = async (
-    mediaId: string
-  ): Promise<string | null> => {
-    try {
-      await getMediaUrl({ mediaId, accessToken })
-      return `/api/whatsapp/media/${mediaId}`
-    } catch (error) {
-      console.error(
-        `Failed to verify media ${mediaId} with Meta:`,
-        error instanceof Error ? error.message : error
-      )
-      return null
+ const verifyAndBuildUrl = async (mediaId: string): Promise<string | null> => {
+  try {
+    // Si YCloud ya nos dio una URL directa, descargar desde ahí
+    const isDirectUrl = mediaId.startsWith('http')
+    
+    let metaUrl: string
+    let mime: string
+
+    if (isDirectUrl) {
+      metaUrl = mediaId
+      mime = message.image?.mime_type || message.video?.mime_type ||
+             message.audio?.mime_type || message.document?.mime_type ||
+             message.sticker?.mime_type || 'application/octet-stream'
+    } else {
+      const result = await getMediaUrl({ mediaId, accessToken })
+      metaUrl = result.url
+      mime = result.mimeType
     }
+
+    // Descargar el archivo
+    const { buffer, contentType } = await downloadMedia({
+      downloadUrl: metaUrl,
+      accessToken: isDirectUrl ? '' : accessToken, // YCloud no necesita auth
+    })
+
+    // Detectar extensión
+    const mimeMap: Record<string, string> = {
+      'image/jpeg': 'jpg',
+      'image/png': 'png',
+      'image/webp': 'webp',
+      'video/mp4': 'mp4',
+      'audio/ogg': 'ogg',
+      'audio/mpeg': 'mp3',
+      'application/pdf': 'pdf',
+    }
+    const finalMime = mime || contentType
+    const ext = mimeMap[finalMime] || 'bin'
+    const fileId = isDirectUrl ? mediaId.split('/').pop()?.split('?')[0] || Date.now().toString() : mediaId
+    const path = `whatsapp/${fileId}.${ext}`
+
+    // Subir a Supabase Storage
+    const { error: uploadError } = await supabaseAdmin()
+      .storage
+      .from('chat-media')
+      .upload(path, buffer, {
+        contentType: finalMime,
+        upsert: true,
+      })
+
+    if (uploadError) {
+      console.error('[media] Error subiendo a storage:', uploadError)
+      return isDirectUrl ? metaUrl : `/api/whatsapp/media/${mediaId}`
+    }
+
+    const { data } = supabaseAdmin()
+      .storage
+      .from('chat-media')
+      .getPublicUrl(path)
+
+    return data.publicUrl
+
+  } catch (error) {
+    console.error(`Failed to process media ${mediaId}:`, error instanceof Error ? error.message : error)
+    return mediaId.startsWith('http') ? mediaId : `/api/whatsapp/media/${mediaId}`
   }
+}
 
   // Default shape — each case overrides only the fields it cares about.
   // Keeps the new `interactiveReplyId` field DRY across every return site.

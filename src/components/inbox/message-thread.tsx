@@ -429,7 +429,10 @@ export function MessageThread({
   const handleSendMedia = useCallback(
     async (payload: SendMediaPayload) => {
       if (!conversation) return;
-
+      if (conversation.channel === 'instagram' && payload.kind === 'audio') {
+        toast.error('Instagram no soporta envío de audio')
+        return
+      }
       const contentText =
         payload.kind === "document"
           ? payload.caption || payload.filename || "Document"
@@ -1079,6 +1082,7 @@ export function MessageThread({
         replyTo={replyTo}
         onClearReply={() => setReplyTo(null)}
         showTemplateButton={isWhatsApp}
+        isInstagram={conversation.channel === 'instagram'}
       />
 
       <TemplatePicker

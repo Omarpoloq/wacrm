@@ -120,6 +120,7 @@ interface MessageComposerProps {
   onClearReply?: () => void;
   /** Whether to show the templates button (WhatsApp only). */
   showTemplateButton?: boolean;
+  isInstagram?: boolean;
 }
 
 function formatDuration(seconds: number): string {
@@ -143,6 +144,7 @@ export function MessageComposer({
   replyTo,
   onClearReply,
   showTemplateButton = true,
+  isInstagram = false
 }: MessageComposerProps) {
   const t = useTranslations("Inbox.composer");
 
@@ -654,24 +656,27 @@ export function MessageComposer({
                 <Paperclip className="h-4 w-4" />
               )}
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="border-border bg-popover">
-              <DropdownMenuItem onClick={() => imageInputRef.current?.click()}>
-                <ImageIcon className="mr-2 h-4 w-4" />
-                {t("photo")}
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => videoInputRef.current?.click()}>
-                <Video className="mr-2 h-4 w-4" />
-                {t("video")}
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => documentInputRef.current?.click()}>
-                <FileText className="mr-2 h-4 w-4" />
-                {t("document")}
-              </DropdownMenuItem>
+           <DropdownMenuContent align="start" className="border-border bg-popover">
+            <DropdownMenuItem onClick={() => imageInputRef.current?.click()}>
+              <ImageIcon className="mr-2 h-4 w-4" />
+              {t("photo")}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => videoInputRef.current?.click()}>
+              <Video className="mr-2 h-4 w-4" />
+              {t("video")}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => documentInputRef.current?.click()}>
+              <FileText className="mr-2 h-4 w-4" />
+              {t("document")}
+            </DropdownMenuItem>
+            {/* Ocultar audio en Instagram */}
+            {!isInstagram && (
               <DropdownMenuItem onClick={() => void startRecording()}>
                 <Mic className="mr-2 h-4 w-4" />
                 {t("voiceNote")}
               </DropdownMenuItem>
-            </DropdownMenuContent>
+            )}
+          </DropdownMenuContent>
           </DropdownMenu>
 
           {/* + menu — interactive messages + quick replies. Gated on the
