@@ -131,6 +131,9 @@
     },
     "conversationList": {
       "searchPlaceholder": "대화 검색...",
+      "channelTabAll": "모든 채널",
+      "channelTabWhatsapp": "WhatsApp",
+      "channelTabInstagram": "Instagram",
       "filterAll": "전체",
       "filterUnread": "읽지 않음",
       "filterOpen": "열림",

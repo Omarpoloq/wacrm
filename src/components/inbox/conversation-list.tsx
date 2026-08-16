@@ -9,7 +9,7 @@ import {
 } from "@/lib/inbox/conversations";
 import { cn } from "@/lib/utils";
 import type { Conversation, ConversationStatus, Tag } from "@/types";
-import { Search, ChevronDown, X } from "lucide-react";
+import { Search, ChevronDown, X, MessageCircle, AtSign } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { useTranslations } from "next-intl";
 import { Input } from "@/components/ui/input";
@@ -44,6 +44,15 @@ const STATUS_COLORS: Record<ConversationStatus, string> = {
 
 type InboxFilter = ConversationStatus | "all" | "unread";
 
+/**
+ * Channel-tab discriminator. Drives the top-of-list tabs that filter
+ * the inbox by inbound channel. Values are literal so they match
+ * `conversation.channel` directly (DB stores "whatsapp" / "instagram";
+ * any other value falls into the "other" bucket, which currently isn't
+ * exposed as its own tab — it just shows up under "all").
+ */
+type ChannelTab = "all" | "whatsapp" | "instagram";
+
 export function ConversationList({
   activeConversationId,
   onSelect,
@@ -61,8 +70,22 @@ export function ConversationList({
     { label: t("filterClosed"), value: "closed" },
   ], [t]);
 
+  /**
+   * Channel-tab options. The labels go through i18n; the values are
+   * literal so the filter in `filtered` is a straight `===` check.
+   * Adding a new channel = add an entry here + a new badge branch in
+   * `ConversationItem`. The DB column already supports arbitrary
+   * channel strings.
+   */
+  const CHANNEL_TABS: { label: string; value: ChannelTab; icon: typeof MessageCircle }[] = useMemo(() => [
+    { label: t("channelTabAll"), value: "all", icon: MessageCircle },
+    { label: t("channelTabWhatsapp"), value: "whatsapp", icon: MessageCircle },
+    { label: t("channelTabInstagram"), value: "instagram", icon: AtSign },
+  ], [t]);
+
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<InboxFilter>("all");
+  const [channelTab, setChannelTab] = useState<ChannelTab>("all");
   const [loading, setLoading] = useState(true);
   const [tags, setTags] = useState<Tag[]>([]);
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
@@ -132,8 +155,39 @@ export function ConversationList({
     return m;
   }, [tags]);
 
+  /**
+   * Live counts per channel, derived from the conversations array.
+   * Re-runs whenever `conversations` changes — which is exactly when
+   * realtime delivers a new conv / status change / unread bump — so
+   * the tab badges stay accurate without an extra subscription. Counts
+   * include unread convs (matches the "All channels" semantics; the
+   * tab tells you how many conversations exist on that channel, not
+   * how many you've cleared).
+   */
+  const channelCounts = useMemo(() => {
+    let whatsapp = 0;
+    let instagram = 0;
+    for (const c of conversations) {
+      if (c.channel === "whatsapp") whatsapp += 1;
+      else if (c.channel === "instagram") instagram += 1;
+    }
+    return {
+      all: conversations.length,
+      whatsapp,
+      instagram,
+    } as const;
+  }, [conversations]);
+
   const filtered = useMemo(() => {
     let result = conversations;
+
+    // Channel tab — applied first so the rest of the filter pipeline
+    // (status / unread / tags / search) operates on the already-narrowed
+    // set. Conversations with an unknown/missing channel are dropped
+    // from the whatsapp/instagram tabs but stay under "all".
+    if (channelTab !== "all") {
+      result = result.filter((c) => c.channel === channelTab);
+    }
 
     if (filter === "unread") {
       result = result.filter((c) => c.unread_count > 0);
@@ -161,7 +215,7 @@ export function ConversationList({
     }
 
     return result;
-  }, [conversations, filter, search, selectedTagIds, selectedCompany]);
+  }, [conversations, channelTab, filter, search, selectedTagIds, selectedCompany]);
 
   const toggleTag = useCallback((id: string) => {
     setSelectedTagIds((prev) =>
@@ -195,6 +249,63 @@ export function ConversationList({
   return (
     <div className="flex h-full w-full flex-col border-r border-border bg-card lg:w-80">
       <div className="space-y-2 border-b border-border p-3">
+        {/*
+          Channel tabs. Rendered above the search box so the channel
+          choice is the first thing the agent picks when they land in
+          the inbox — narrowing first avoids scanning through results
+          that get immediately filtered out. The scroll container is
+          `flex` with `min-w-0` children so the third tab can truncate
+          its label on narrow viewports instead of overflowing the
+          80-wide list panel.
+        */}
+        <div
+          role="tablist"
+          aria-label={t("channelTabAll")}
+          className="flex items-center gap-1 rounded-md bg-muted/40 p-0.5"
+        >
+          {CHANNEL_TABS.map((tab) => {
+            const Icon = tab.icon;
+            const isActive = channelTab === tab.value;
+            const count = channelCounts[tab.value];
+            return (
+              <button
+                key={tab.value}
+                role="tab"
+                type="button"
+                aria-selected={isActive}
+                onClick={() => setChannelTab(tab.value)}
+                className={cn(
+                  "flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-sm px-2 py-1 text-xs font-medium transition-colors",
+                  isActive
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <Icon
+                  className={cn(
+                    "h-3.5 w-3.5 shrink-0",
+                    isActive && tab.value === "whatsapp" && "text-green-600",
+                    isActive && tab.value === "instagram" && "text-pink-600",
+                  )}
+                />
+                <span className="truncate">{tab.label}</span>
+                {count > 0 && (
+                  <span
+                    className={cn(
+                      "shrink-0 rounded-full px-1.5 text-[10px] font-semibold leading-4",
+                      isActive
+                        ? "bg-primary/15 text-primary"
+                        : "bg-muted-foreground/15 text-muted-foreground",
+                    )}
+                  >
+                    {count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
         <div className="relative">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input

@@ -131,6 +131,9 @@
     },
     "conversationList": {
       "searchPlaceholder": "Search conversations...",
+      "channelTabAll": "All channels",
+      "channelTabWhatsapp": "WhatsApp",
+      "channelTabInstagram": "Instagram",
       "filterAll": "All",
       "filterUnread": "Unread",
       "filterOpen": "Open",
