@@ -319,8 +319,8 @@ function InboxPageInner() {
             ),
           );
         } else {
-          // UPDATE arrived before the INSERT (or after a missed INSERT)
-          // — fetch the row so it surfaces with its contact joined. The
+          // UPDATE arrived before the INSERT (or after a missed INSERT) —
+          // fetch the row so it surfaces with its contact joined. The
           // patch contained in `conv` will already be reflected in what
           // the hydrate fetch returns.
           hydrateConversation(conv.id);
@@ -632,7 +632,24 @@ function InboxPageInner() {
             toggle — which is itself desktop-only — never affects it. */}
         {contactPanelOpen && (
           <div className="hidden lg:block">
-            <ContactSidebar contact={activeContact} />
+            <ContactSidebar
+              contact={activeContact}
+              conversation={activeConversation}
+              onBotToggle={(active) => {
+                if (activeConversation) {
+                  setActiveConversation((prev) =>
+                    prev ? { ...prev, bot_active: active } : prev
+                  );
+                  setConversations((prev) =>
+                    prev.map((c) =>
+                      c.id === activeConversation.id
+                        ? { ...c, bot_active: active }
+                        : c
+                    )
+                  );
+                }
+              }}
+            />
           </div>
         )}
       </div>

@@ -41,6 +41,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MessageBubble } from "./message-bubble";
 import { MessageActions } from "./message-actions";
+import { MessageSkeleton } from "./message-skeleton";
 import {
   MessageComposer,
   CHAT_MEDIA_BUCKET,
@@ -49,6 +50,7 @@ import {
 import { deleteAccountMedia } from "@/lib/storage/upload-media";
 import { TemplatePicker } from "./template-picker";
 import { AiThreadBanner } from "./ai-thread-banner";
+import { FunnelStageBadge } from "@/components/FunnelStageBadge";
 import { buildReplyPreview } from "./reply-quote";
 import { toast } from "sonner";
 
@@ -837,6 +839,9 @@ export function MessageThread({
                   WA
                 </span>
               )}
+              {contact.funnel_stage && contact.funnel_stage !== "nuevo" && (
+                <FunnelStageBadge stage={contact.funnel_stage} />
+              )}
             </div>
             <p className="truncate text-xs text-muted-foreground">
               {conversation.channel === 'instagram' && contact.company
@@ -989,9 +994,7 @@ export function MessageThread({
       {/* MESSAGES AREA */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
         {loading ? (
-          <div className="flex items-center justify-center py-12">
-            <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-          </div>
+          <MessageSkeleton count={3} />
         ) : messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12">
             <p className="text-sm text-muted-foreground">{t("noMessagesYet")}</p>

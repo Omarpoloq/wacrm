@@ -211,6 +211,9 @@
       "photo": "Photo",
       "video": "Video",
       "audio": "Audio",
+      "playAudio": "Play audio",
+      "pauseAudio": "Pause audio",
+      "audioSeek": "Seek audio to {time}",
       "unavailable": "{label} unavailable",
       "document": "Document",
       "locationShared": "Location shared",
@@ -219,7 +222,10 @@
       "interactiveReply": "[Interactive reply]",
       "unsupported": "[Unsupported message type]",
       "aiBadge": "AI",
-      "aiBadgeTitle": "Sent automatically by the AI assistant"
+      "aiBadgeTitle": "Sent automatically by the AI assistant",
+      "expandImage": "Expand image",
+      "expandVideo": "Expand video",
+      "closeLightbox": "Close"
     },
     "actions": {
       "reply": "Reply",

@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
 import { cn } from "@/lib/utils";
-import type { Contact, Deal, ContactNote, Tag } from "@/types";
+import type { Contact, Conversation, Deal, ContactNote, Tag } from "@/types";
 import {
   Phone,
   Mail,
@@ -20,12 +20,19 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { format } from "date-fns";
 import { useTranslations } from "next-intl";
+import { BotToggle } from "@/components/BotToggle";
 
 interface ContactSidebarProps {
   contact: Contact | null;
+  conversation: Conversation | null;
+  onBotToggle: (active: boolean) => void;
 }
 
-export function ContactSidebar({ contact }: ContactSidebarProps) {
+export function ContactSidebar({
+  contact,
+  conversation,
+  onBotToggle,
+}: ContactSidebarProps) {
   const tSidebar = useTranslations("Inbox.sidebar");
   const tThread = useTranslations("Inbox.messageThread");
 
@@ -154,6 +161,17 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
               <p className="text-xs text-muted-foreground">{contact.company}</p>
             )}
           </div>
+
+          {/* Bot Toggle */}
+          {conversation && (
+            <div className="mt-4 flex justify-center">
+              <BotToggle
+                conversationId={conversation.id}
+                botActive={conversation.bot_active ?? true}
+                onToggle={onBotToggle}
+              />
+            </div>
+          )}
 
           {/* Phone */}
           <div className="mt-4 space-y-2">

@@ -21,6 +21,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { FunnelStageBadge } from "@/components/FunnelStageBadge";
+import { ConversationListSkeleton } from "./conversation-list-skeleton";
 
 interface ConversationListProps {
   activeConversationId: string | null;
@@ -472,9 +474,7 @@ export function ConversationList({
 
       <ScrollArea className="min-h-0 flex-1">
         {loading ? (
-          <div className="flex items-center justify-center py-12">
-            <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-          </div>
+          <ConversationListSkeleton />
         ) : filtered.length === 0 ? (
           <div className="px-4 py-12 text-center">
             <p className="text-sm text-muted-foreground">{t("noConversations")}</p>
@@ -562,6 +562,9 @@ function ConversationItem({
               <span className="shrink-0 text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full leading-none">
                 WA
               </span>
+            )}
+            {conversation.contact?.funnel_stage && conversation.contact.funnel_stage !== 'nuevo' && (
+              <FunnelStageBadge stage={conversation.contact.funnel_stage} />
             )}
             {/* Si hay otros canales, puedes agregarlos */}
           </div>

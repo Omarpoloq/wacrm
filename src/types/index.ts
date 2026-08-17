@@ -115,6 +115,12 @@ export interface Contact {
   /** Hydrated by queries that embed `contact_tags(tags(*))` (e.g. the
    *  Inbox conversation list, for tag filtering). Absent otherwise. */
   tags?: Tag[];
+  /**
+   * Pipeline/funnel stage for this contact (Fase 1 migration).
+   * Default 'nuevo'; n8n advances it via `/api/n8n/event` with
+   * `event: "funnel_stage_changed"`.
+   */
+  funnel_stage?: string;
 }
 
 export interface Tag {
@@ -184,6 +190,13 @@ export interface Conversation {
   ai_autoreply_disabled?: boolean;
   ai_reply_count?: number;
   ai_handoff_summary?: string | null;
+  /**
+   * n8n chatbot state for this thread (newer, channel-agnostic):
+   *  - `bot_active` — whether the n8n bot is allowed to respond here.
+   *    Mirrors the classic `ai_autoreply_disabled` (bot pausada) but is
+   *    a dedicated column (Fase 1 migration). `true` = bot can chat.
+   */
+  bot_active?: boolean;
 }
 
 // ============================================================

@@ -211,6 +211,9 @@
       "photo": "Foto",
       "video": "Vídeo",
       "audio": "Audio",
+      "playAudio": "Reproducir audio",
+      "pauseAudio": "Pausar audio",
+      "audioSeek": "Saltar audio a {time}",
       "unavailable": "{label} no disponible",
       "document": "Documento",
       "locationShared": "Ubicación compartida",
@@ -219,7 +222,10 @@
       "interactiveReply": "[Respuesta interactiva]",
       "unsupported": "[Tipo de mensaje no soportado]",
       "aiBadge": "IA",
-      "aiBadgeTitle": "Enviado automáticamente por el asistente de IA"
+      "aiBadgeTitle": "Enviado automáticamente por el asistente de IA",
+      "expandImage": "Ampliar imagen",
+      "expandVideo": "Ampliar video",
+      "closeLightbox": "Cerrar"
     },
     "actions": {
       "reply": "Responder",

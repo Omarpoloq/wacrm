@@ -219,7 +219,10 @@
       "interactiveReply": "[인터랙티브 응답]",
       "unsupported": "[지원되지 않는 메시지 형식]",
       "aiBadge": "AI",
-      "aiBadgeTitle": "AI 어시스턴트가 자동으로 전송함"
+      "aiBadgeTitle": "AI 어시스턴트가 자동으로 전송함",
+      "expandImage": "이미지 확대",
+      "expandVideo": "비디오 확대",
+      "closeLightbox": "닫기"
     },
     "actions": {
       "reply": "답장",
