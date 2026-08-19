@@ -43,6 +43,9 @@ interface AccountSummary {
   /** Default deal currency (ISO-4217). NOT NULL DEFAULT 'USD' in the
    *  DB (migration 021); narrowed to DEFAULT_CURRENCY when absent. */
   default_currency: string;
+  /** n8n webhook configuration (migrations 037, 038) */
+  n8n_webhook_url: string | null;
+  n8n_webhook_secret: string | null;
 }
 
 interface AuthContextValue {
@@ -171,7 +174,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             .from("accounts")
             // default_currency added in migration 021; narrowed to the
             // USD fallback below for older schemas where it reads null.
-            .select("id, name, default_currency")
+            // n8n_webhook_url (migration 038) and n8n_webhook_secret (migration 037)
+            .select("id, name, default_currency, n8n_webhook_url, n8n_webhook_secret")
             .eq("id", data.account_id)
             .maybeSingle();
           if (accountErr) {
@@ -186,6 +190,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               id: account.id,
               name: account.name,
               default_currency: account.default_currency ?? DEFAULT_CURRENCY,
+              n8n_webhook_url: account.n8n_webhook_url ?? null,
+              n8n_webhook_secret: account.n8n_webhook_secret ?? null,
             };
           }
         }

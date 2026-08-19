@@ -71,7 +71,7 @@ interface MessageThreadProps {
   conversation: Conversation | null;
   contact: Contact | null;
   messages: Message[];
-  onMessagesLoaded: (messages: Message[]) => void;
+  onMessagesLoaded: (messages: Message[] | ((prev: Message[]) => Message[])) => void;
   onNewMessage: (message: Message) => void;
   onUpdateMessage: (id: string, updates: Partial<Message>) => void;
   onStatusChange: (conversationId: string, status: ConversationStatus) => void;
@@ -142,11 +142,17 @@ export function MessageThread({
   const { getPresence, getRow, now } = usePresence();
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef(true);
+  const [showNewMessagesBadge, setShowNewMessagesBadge] = useState(false);
+  const lastMessageIdRef = useRef<string | null>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [reactions, setReactions] = useState<MessageReaction[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [hasMoreMessages, setHasMoreMessages] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const oldestMessageRef = useRef<string | null>(null);
   useEffect(() => {
     return () => {
       if (refreshTimerRef.current !== null) {
@@ -227,18 +233,29 @@ export function MessageThread({
     (async () => {
       setLoading(true);
 
+      // Load messages in descending order (newest first) with a limit
+      // to emulate WhatsApp's behavior - load recent messages first
       const { data, error } = await supabase
         .from("messages")
         .select("*")
         .eq("conversation_id", conversationId)
-        .order("created_at", { ascending: true });
+        .order("created_at", { ascending: false })
+        .limit(50);
 
       if (cancelled) return;
 
       if (error) {
         console.error("Failed to fetch messages:", error);
       } else {
-        onMessagesLoadedRef.current(data ?? []);
+        // Reverse to display oldest first (newest at bottom)
+        const messages = (data ?? []).reverse();
+        onMessagesLoadedRef.current((prev) => {
+          // Mantener los existentes si ya fueron cargados por realtime
+          const existingIds = new Set(messages.map((m) => m.id));
+          return [...messages, ...prev.filter(p => !existingIds.has(p.id))];
+        });
+        // Set hasMoreMessages if we got a full page
+        setHasMoreMessages((data ?? []).length === 50);
       }
 
       if (!cancelled) setLoading(false);
@@ -359,12 +376,100 @@ export function MessageThread({
       });
   }, [conversationId, hasUnread]);
 
+  // Track the oldest loaded message for pagination
   useEffect(() => {
-    if (scrollRef.current) {
-      const el = scrollRef.current;
-      el.scrollTop = el.scrollHeight;
+    if (messages.length > 0) {
+      oldestMessageRef.current = messages[0].id;
     }
   }, [messages]);
+
+  // Load more messages when scrolling up
+  const loadMoreMessages = useCallback(async () => {
+    if (!conversationId || loadingMore || !hasMoreMessages || !oldestMessageRef.current) return;
+
+    const supabase = createClient();
+    setLoadingMore(true);
+
+    try {
+      const { data, error } = await supabase
+        .from("messages")
+        .select("*")
+        .eq("conversation_id", conversationId)
+        .lt("created_at", messages[0]?.created_at ?? new Date().toISOString())
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (error) {
+        console.error("Failed to load more messages:", error);
+      } else if (data && data.length > 0) {
+        const newMessages = data.reverse(); // oldest first
+        onMessagesLoadedRef.current((prev: Message[]) => {
+          // Filtrar duplicados comparando IDs
+          const existingIds = new Set(prev.map((m) => m.id));
+          const uniqueNewMessages = newMessages.filter((m) => !existingIds.has(m.id));
+          return [...uniqueNewMessages, ...prev];
+        });
+        setHasMoreMessages(data.length === 50);
+      } else {
+        setHasMoreMessages(false);
+      }
+    } catch (err) {
+      console.error("Failed to load more messages:", err);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [conversationId, loadingMore, hasMoreMessages, messages]);
+
+  // Scroll to bottom on new messages, but preserve position when loading more
+  const scrollToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    
+    // Use requestAnimationFrame to wait for layout/image rendering
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+  }, []);
+
+  // Auto-scroll to bottom ONLY when a message is appended at the end
+  // (new inbound/outbound message) or the very first load. We must NOT
+  // jump to the bottom when older messages are prepended via pagination
+  // (infinite scroll up), otherwise the scroll position is lost.
+  useEffect(() => {
+    if (isAtBottomRef.current) {
+      scrollToBottom();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages.length]);
+
+  // Detect when a NEW message arrives at the end while the user is scrolled
+  // up (not at the bottom). We compare the last message id: prepend from
+  // pagination doesn't change the tail, so a new tail id means a new message.
+  useEffect(() => {
+    const last = messages[messages.length - 1];
+    if (!last) {
+      lastMessageIdRef.current = null;
+      return;
+    }
+    if (lastMessageIdRef.current && lastMessageIdRef.current !== last.id && !isAtBottomRef.current) {
+      setShowNewMessagesBadge(true);
+    }
+    lastMessageIdRef.current = last.id;
+  }, [messages]);
+
+  // Handle scroll for load more + track whether we're pinned to the bottom
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const target = e.currentTarget;
+    const atBottom =
+      target.scrollHeight - target.scrollTop - target.clientHeight < 40;
+    isAtBottomRef.current = atBottom;
+    if (atBottom && showNewMessagesBadge) {
+      setShowNewMessagesBadge(false);
+    }
+    if (target.scrollTop === 0 && hasMoreMessages && !loadingMore) {
+      loadMoreMessages();
+    }
+  }, [hasMoreMessages, loadingMore, loadMoreMessages, showNewMessagesBadge]);
 
   // ============================================================
   // HANDLERS ADAPTADOS PARA AMBOS CANALES
@@ -992,7 +1097,12 @@ export function MessageThread({
       </div>
 
       {/* MESSAGES AREA */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
+      <ScrollArea
+        className="flex-1 min-h-0 px-4 py-4"
+        viewportRef={scrollRef}
+        onScroll={handleScroll}
+        style={{ height: '100%' }}
+      >
         {loading ? (
           <MessageSkeleton count={3} />
         ) : messages.length === 0 ? (
@@ -1004,6 +1114,12 @@ export function MessageThread({
           </div>
         ) : (
           <div className="space-y-4">
+            {loadingMore && (
+              <div className="flex items-center justify-center py-2">
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                <span className="ml-2 text-xs text-muted-foreground">{t("loadingMoreMessages")}</span>
+              </div>
+            )}
             {messageGroups.map((group) => (
               <div key={group.date}>
                 <div className="mb-4 flex items-center justify-center">
@@ -1059,7 +1175,31 @@ export function MessageThread({
             ))}
           </div>
         )}
-      </div>
+      </ScrollArea>
+
+      {showNewMessagesBadge && (
+        <button
+          type="button"
+          onClick={() => {
+            scrollToBottom();
+            setShowNewMessagesBadge(false);
+            isAtBottomRef.current = true;
+          }}
+          className="absolute bottom-24 left-1/2 z-20 -translate-x-1/2 animate-bounce rounded-full bg-primary px-4 py-1.5 text-xs font-medium text-primary-foreground shadow-lg transition hover:bg-primary/90"
+        >
+          <span className="flex items-center gap-2">
+            {t("newMessages")}
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              className="h-4 w-4"
+            >
+              <path d="M10 3a.75.75 0 01.75.75v10.638l3.96-3.96a.75.75 0 111.06 1.06l-5.25 5.25a.75.75 0 01-1.06 0L4.2 11.488a.75.75 0 111.06-1.06l3.96 3.96V3.75A.75.75 0 0110 3z" />
+            </svg>
+          </span>
+        </button>
+      )}
 
       <AiThreadBanner
         conversationId={conversation.id}

@@ -2,6 +2,7 @@
 import { NextResponse, after } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { isUniqueViolation } from '@/lib/contacts/dedupe';
+import { dispatchInboundToN8n } from '@/lib/n8n/dispatchInboundToN8n';
 
 // Lazy Supabase admin client
 let _adminClient: any = null;
@@ -228,6 +229,31 @@ async function processInstagramWebhook(body: any) {
           updated_at: new Date().toISOString(),
         })
         .eq('id', conversation.id);
+
+      // ============================================================
+      // n8n dispatch — Instagram doesn't have internal flows, so always fire.
+      // Fire-and-forget with .catch() so errors never block the webhook.
+      // ============================================================
+      const n8nPayload = {
+        event_type: 'message_received' as const,
+        channel: 'instagram' as const,
+        conversation_id: conversation.id,
+        contact_id: contact.id,
+        message_id: messageId,
+        content: contentText ?? '',
+        content_type: contentType,
+        media_url: mediaUrl,
+        sender_type: 'customer' as const,
+        account_id: accountId,
+        contact: {
+          external_id: senderId, // Instagram user ID
+          name: contact.name,
+          channel: 'instagram',
+        },
+      }
+      dispatchInboundToN8n(accountId, n8nPayload).catch((err) =>
+        console.error('[n8n] Instagram dispatch failed:', err)
+      )
 
       console.log(`[Instagram] Message processed: ${messageId} for contact ${contact.id}`);
     }

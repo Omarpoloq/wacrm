@@ -8,6 +8,7 @@ import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
+import { dispatchInboundToN8n } from '@/lib/n8n/dispatchInboundToN8n'
 import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
@@ -713,6 +714,34 @@ async function processMessage(
     isFirstInboundMessage,
   })
   const flowConsumed = flowResult.consumed
+
+  // ============================================================
+  // n8n dispatch — fire when internal flows did NOT consume the message.
+  // This prevents duplicate responses (n8n would respond on its own).
+  // Fire-and-forget with .catch() so errors never block the webhook.
+  // ============================================================
+  if (!flowConsumed) {
+    const n8nPayload = {
+      event_type: 'message_received' as const,
+      channel: 'whatsapp' as const,
+      conversation_id: conversation.id,
+      contact_id: contactRecord.id,
+      message_id: message.id,
+      content: contentText ?? message.text?.body ?? '',
+      content_type: contentType,
+      media_url: mediaUrl,
+      sender_type: 'customer' as const,
+      account_id: accountId,
+      contact: {
+        external_id: senderPhone, // WhatsApp number (already normalized)
+        name: contactName,
+        channel: 'whatsapp',
+      },
+    }
+    dispatchInboundToN8n(accountId, n8nPayload).catch((err) =>
+      console.error('[n8n] dispatch failed:', err)
+    )
+  }
 
   // Fire any automations that react to this webhook event. All dispatches
   // run here (not earlier) so the contact, conversation, and inbound

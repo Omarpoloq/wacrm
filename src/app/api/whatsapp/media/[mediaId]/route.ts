@@ -64,19 +64,35 @@ export async function GET(
 
     const accessToken = decrypt(config.access_token)
 
-    // Get the download URL from Meta
-    const mediaInfo = await getMediaUrl({ mediaId, accessToken })
+    // Get the download URL
+    // If it's a URL (YCloud/direct), use it directly. Otherwise, fetch from Meta.
+    let url: string
+    let mimeType: string = 'application/octet-stream'
+
+    if (mediaId.startsWith('http')) {
+      url = mediaId
+    } else {
+      const mediaInfo = await getMediaUrl({ mediaId, accessToken })
+      url = mediaInfo.url
+      mimeType = mediaInfo.mimeType
+    }
 
     // Download the binary data
-    const { buffer, contentType } = await downloadMedia({
-      downloadUrl: mediaInfo.url,
-      accessToken,
+    const response = await fetch(url, {
+      headers: !mediaId.startsWith('http') ? { Authorization: `Bearer ${accessToken}` } : {},
     })
+
+    if (!response.ok) {
+      throw new Error(`Media download failed: ${response.status}`)
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer())
+    const contentType = response.headers.get('content-type') || mimeType
 
     return new Response(new Uint8Array(buffer), {
       status: 200,
       headers: {
-        'Content-Type': contentType || mediaInfo.mimeType || 'application/octet-stream',
+        'Content-Type': contentType,
         'Cache-Control': 'public, max-age=86400',
       },
     })

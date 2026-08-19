@@ -1,32 +1,10 @@
 // ============================================================
 // POST /api/n8n/event
-//
-// Ingest endpoint for n8n chatbot flows. n8n calls this whenever a
-// chatbot conversation produces an event worth persisting —
-// an inbound/outbound message, a funnel-stage change, an AI escalation
-// to a human, etc. It mirrors the server-side persistence the WhatsApp
-// webhook performs, but is deliberately channel-agnostic: n8n tells us
-// the channel (`whatsapp` | `instagram`) and whether the message is
-// inbound or outbound.
-//
-// Why the service-role client?
-//   n8n posts here from a server with a shared secret (`x-n8n-secret`),
-//   NOT from an authenticated browser session. We therefore cannot rely
-//   on Supabase Auth (no session cookies) and must use the admin client,
-//   exactly like `src/app/api/whatsapp/webhook/route.ts`. RLS is bypassed,
-//   so every write below must be scoped explicitly by account/user —
-//   there is no auth.uid() to save us.
-//
-// Auth
-//   Header `x-n8n-secret` must equal `N8N_WEBHOOK_SECRET`.
 // ============================================================
 
 import { NextResponse } from "next/server";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
-import { normalizePhone } from "@/lib/whatsapp/phone-utils";
 
-// Lazy singleton so the env var isn't read at build time (matches the
-// pattern in the WhatsApp webhook).
 let _adminClient: SupabaseClient | null = null;
 function supabaseAdmin(): SupabaseClient {
   if (!_adminClient) {
@@ -48,69 +26,147 @@ type N8nEvent =
   | "escalate_human";
 
 interface N8nPayload {
-  event: N8nEvent;
-  channel: "whatsapp" | "instagram";
-  contact: {
+  // Required fields (minimal payload support)
+  conversation_id?: string;
+  content?: string;
+  timestamp?: string;
+  
+  // Optional but recommended fields
+  event?: N8nEvent;
+  channel?: "whatsapp" | "instagram";
+  contact?: {
     external_id: string;
     name?: string;
     username?: string;
   };
-  conversation_id?: string;
   message?: {
     content?: string;
     direction?: "inbound" | "outbound";
     timestamp?: string;
+    message_uuid?: string; // For idempotency
   };
   funnel_stage?: string;
   flow_id?: string;
   metadata?: Record<string, unknown>;
+  
+  // Idempotency key (can be at root level or in message)
+  message_uuid?: string;
 }
 
-// External webhooks can't resolve `user_id` / `account_id` from a session.
-// The shared secret identifies *which* tenant this webhook belongs to, so
-// we derive the owning account from the `profiles` table. `user_id` is the
-// profile's row owner; `account_id` is its tenancy key (post-017).
 interface TenantCtx {
   userId: string;
   accountId: string;
 }
 
-async function resolveTenant(
+async function resolveTenantBySecret(
   supabase: SupabaseClient,
-  fallbackUserId?: string,
+  secret: string,
 ): Promise<TenantCtx | null> {
-  if (fallbackUserId) {
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("user_id, account_id")
-      .eq("user_id", fallbackUserId)
-      .maybeSingle();
-    if (profile?.account_id) {
-      return { userId: profile.user_id, accountId: profile.account_id as string };
-    }
+  // Find the account by the webhook secret
+  const { data: account } = await supabase
+    .from("accounts")
+    .select("id, owner_user_id")
+    .eq("n8n_webhook_secret", secret)
+    .maybeSingle();
+  
+  if (!account) {
+    return null;
   }
-  // Fall back to the first profile that has an account (single-tenant
-  // setups / bootstrapping). Prefer an admin-owned account.
+  
+  // Get the profile (owner) to get user_id
   const { data: profile } = await supabase
     .from("profiles")
-    .select("user_id, account_id")
-    .eq("role", "admin")
-    .limit(1)
+    .select("user_id")
+    .eq("user_id", account.owner_user_id)
     .maybeSingle();
-  if (profile?.account_id) {
-    return { userId: profile.user_id, accountId: profile.account_id as string };
+  
+  if (!profile) {
+    return null;
   }
-  return null;
+  
+  return {
+    userId: profile.user_id,
+    accountId: account.id,
+  };
+}
+
+// Extract message UUID for idempotency
+function extractMessageUuid(payload: N8nPayload): string | undefined {
+  return payload.message_uuid ?? payload.message?.message_uuid;
+}
+
+// Determine sender type based on direction or event
+function determineSenderType(payload: N8nPayload): "bot" | "customer" {
+  // If explicit direction is provided, use it
+  if (payload.message?.direction) {
+    return payload.message.direction === "outbound" ? "bot" : "customer";
+  }
+  // If event is message_sent, it's from bot
+  if (payload.event === "message_sent") {
+    return "bot";
+  }
+  // If event is message_received, it's from customer
+  if (payload.event === "message_received") {
+    return "customer";
+  }
+  // Default to bot for minimal payloads (assuming bot-to-provider flow)
+  return "bot";
+}
+
+// Extract content from payload (supports both flat and nested structures)
+function extractContent(payload: N8nPayload): string | undefined {
+  return payload.content ?? payload.message?.content;
+}
+
+// Extract timestamp from payload
+function extractTimestamp(payload: N8nPayload): Date {
+  const ts = payload.timestamp ?? payload.message?.timestamp;
+  if (ts) {
+    const parsed = new Date(ts);
+    if (!isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+  return new Date();
+}
+
+// Extract channel from payload with sensible default
+function extractChannel(payload: N8nPayload): "whatsapp" | "instagram" {
+  return payload.channel ?? "whatsapp";
+}
+
+// Extract contact info with defaults
+function extractContactInfo(payload: N8nPayload, conversationId?: string): { externalId: string; name?: string } {
+  if (payload.contact?.external_id) {
+    return {
+      externalId: payload.contact.external_id,
+      name: payload.contact.name,
+    };
+  }
+  // Fallback: try to derive from conversation_id or use a placeholder
+  // This allows minimal payloads to work
+  return {
+    externalId: conversationId ?? `unknown-${Date.now()}`,
+    name: undefined,
+  };
 }
 
 // ---------------- Handler -------------------------------------------------
 
 export async function POST(request: Request) {
   try {
-    // -- Auth: shared secret ------------------------------------------------
+    // -- Auth: shared secret from accounts table (multi-tenant) ------------
     const secret = request.headers.get("x-n8n-secret");
-    if (!secret || secret !== process.env.N8N_WEBHOOK_SECRET) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    if (!secret) {
+      return NextResponse.json({ error: "Unauthorized: missing secret" }, { status: 401 });
+    }
+
+    const supabase = supabaseAdmin();
+    
+    // Resolve tenant by secret (finds account and owner user_id)
+    const tenant = await resolveTenantBySecret(supabase, secret);
+    if (!tenant) {
+      return NextResponse.json({ error: "Unauthorized: invalid secret" }, { status: 401 });
     }
 
     // -- Parse payload ------------------------------------------------------
@@ -124,98 +180,97 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!payload.event || !payload.channel || !payload.contact?.external_id) {
+    // -- Idempotency check (early return if duplicate) ----------------------
+    const messageUuid = extractMessageUuid(payload);
+    
+    if (messageUuid) {
+      const { data: existingMsg } = await supabase
+        .from("messages")
+        .select("id")
+        .eq("metadata->>message_uuid", messageUuid)
+        .maybeSingle();
+      
+      if (existingMsg) {
+        return NextResponse.json({
+          ok: true,
+          idempotent: true,
+          message_id: existingMsg.id,
+          message: "Duplicate message ignored",
+        });
+      }
+    }
+
+    // -- Validate minimal required fields -----------------------------------
+    // At minimum we need either content or conversation_id to proceed
+    const content = extractContent(payload);
+    if (!content && !payload.conversation_id) {
       return NextResponse.json(
-        { error: "Missing required fields: event, channel, contact.external_id" },
+        { error: "Missing required fields: either 'content' or 'conversation_id' must be provided" },
         { status: 400 },
       );
     }
 
-    const supabase = supabaseAdmin();
+    // -- Extract common fields ----------------------------------------------
+    const channel = extractChannel(payload);
+    const senderType = determineSenderType(payload);
+    const timestamp = extractTimestamp(payload).toISOString();
+    const flowId = payload.flow_id ?? payload.metadata?.flow_id ?? null;
 
-    // Resolve the owning tenant. `metadata.user_id` lets n8n pin a
-    // specific tenant; otherwise we fall back to the admin profile.
-    const metadataUserId =
-      typeof payload.metadata?.user_id === "string"
-        ? (payload.metadata.user_id as string)
-        : undefined;
-    const tenant = await resolveTenant(supabase, metadataUserId);
-    if (!tenant) {
-      return NextResponse.json(
-        { error: "No tenant could be resolved for this webhook" },
-        { status: 500 },
-      );
-    }
-
-    // -- 1. Find or create the contact --------------------------------------
-    // Contacts are account-scoped post-022/017. We look up by
-    // (account_id, channel, external_id). If the column set differs on the
-    // live DB, `external_id` may be absent; we still try, and fall back to
-    // phone-normalized lookup when available.
-    const externalId = payload.contact.external_id;
-    const channel = payload.channel;
+    // -- 1. Resolve or create contact ---------------------------------------
     let contactId: string;
-    let phoneNormalized: string | null = null;
+    const { externalId, name } = extractContactInfo(payload, payload.conversation_id);
+    const phonedigits = externalId.replace(/\D/g, "");
 
-    try {
-      phoneNormalized = normalizePhone(externalId);
-    } catch {
-      phoneNormalized = null;
-    }
-
-    const { data: existingContact, error: contactErr } = await supabase
+    // Try to find existing contact (scoped by account_id)
+    const { data: existingContact } = await supabase
       .from("contacts")
-      .select("id, external_id, channel")
+      .select("id, name")
       .eq("account_id", tenant.accountId)
-      .or(`external_id.eq.${externalId},channel.eq.${channel}`)
+      .or(`external_id.eq.${externalId},phone.eq.${externalId},phone_normalized.eq.${phonedigits}`)
       .maybeSingle();
-
-    if (contactErr && contactErr.code !== "PGRST116") {
-      console.error("[n8n/event] contact lookup failed:", contactErr);
-    }
 
     if (existingContact) {
       contactId = existingContact.id;
+      
+      // Update contact name if we have one and it's not set
+      if (name && !existingContact.name) {
+        await supabase
+          .from("contacts")
+          .update({ name })
+          .eq("id", contactId);
+      }
     } else {
-      const insertPayload: Record<string, unknown> = {
-        user_id: tenant.userId,
-        account_id: tenant.accountId,
-        phone: externalId,
-        name: payload.contact.name ?? null,
-        channel,
-        external_id: externalId,
-        funnel_stage: payload.funnel_stage ?? "nuevo",
-      };
-      if (phoneNormalized) insertPayload.phone_normalized = phoneNormalized;
-
+      // Create new contact
       const { data: created, error: insertErr } = await supabase
         .from("contacts")
-        .insert(insertPayload)
+        .insert({
+          user_id: tenant.userId,
+          account_id: tenant.accountId,
+          phone: externalId,
+          phone_normalized: phonedigits || null,
+          name: name ?? null,
+          channel,
+          external_id: externalId,
+          funnel_stage: payload.funnel_stage ?? "nuevo",
+        })
         .select("id")
         .single();
 
       if (insertErr) {
-        // Unique-violation race (022 / 036): another write created the row
-        // between our SELECT and INSERT. Re-resolve instead of failing.
-        if (insertErr.code === "23505") {
-          const { data: re } = await supabase
-            .from("contacts")
-            .select("id")
-            .eq("account_id", tenant.accountId)
-            .eq("external_id", externalId)
-            .maybeSingle();
-          if (re) {
-            contactId = re.id;
-          } else {
-            return NextResponse.json(
-              { error: "Failed to create contact (duplicate)" },
-              { status: 409 },
-            );
-          }
+        // Race condition: re-check
+        const { data: fallback } = await supabase
+          .from("contacts")
+          .select("id")
+          .eq("account_id", tenant.accountId)
+          .or(`external_id.eq.${externalId},phone.eq.${externalId},phone_normalized.eq.${phonedigits}`)
+          .maybeSingle();
+
+        if (fallback) {
+          contactId = fallback.id;
         } else {
-          console.error("[n8n/event] contact insert failed:", insertErr);
+          console.error("[n8n/event] contact insert failed:", JSON.stringify(insertErr));
           return NextResponse.json(
-            { error: "Failed to create contact" },
+            { error: "Failed to resolve contact", detail: insertErr.message },
             { status: 500 },
           );
         }
@@ -224,23 +279,28 @@ export async function POST(request: Request) {
       }
     }
 
-    // -- 2. Find or create the conversation ---------------------------------
+    // -- 2. Resolve or create conversation ----------------------------------
     let conversationId: string | undefined = payload.conversation_id;
 
+    // If conversation_id provided, verify it belongs to this account
     if (conversationId) {
-      // Confirm it belongs to this account so a forged id can't leak
-      // another tenant's thread.
       const { data: convCheck } = await supabase
         .from("conversations")
-        .select("id")
+        .select("id, contact_id")
         .eq("id", conversationId)
         .eq("account_id", tenant.accountId)
         .maybeSingle();
-      if (!convCheck) conversationId = undefined;
+      
+      if (!convCheck) {
+        conversationId = undefined;
+      } else if (convCheck.contact_id !== contactId) {
+        // Conversation exists but for different contact - create new one
+        conversationId = undefined;
+      }
     }
 
     if (!conversationId) {
-      // One conversation per (account, contact) — migration 036.
+      // Find existing conversation for this contact (scoped by account_id)
       const { data: existingConv } = await supabase
         .from("conversations")
         .select("id, bot_active")
@@ -253,6 +313,7 @@ export async function POST(request: Request) {
       if (existingConv) {
         conversationId = existingConv.id;
       } else {
+        // Create new conversation
         const { data: createdConv, error: convErr } = await supabase
           .from("conversations")
           .insert({
@@ -261,13 +322,14 @@ export async function POST(request: Request) {
             contact_id: contactId,
             channel,
             bot_active: true,
-            assigned_flow_id: payload.flow_id ?? null,
+            assigned_flow_id: flowId,
           })
           .select("id")
           .single();
 
         if (convErr) {
           if (convErr.code === "23505") {
+            // Race condition: find the conversation that won
             const { data: re } = await supabase
               .from("conversations")
               .select("id")
@@ -275,6 +337,8 @@ export async function POST(request: Request) {
               .eq("contact_id", contactId)
               .maybeSingle();
             if (re) conversationId = re.id;
+          } else {
+            console.error("[n8n/event] conversation insert failed:", convErr);
           }
         } else {
           conversationId = createdConv.id;
@@ -289,22 +353,36 @@ export async function POST(request: Request) {
       );
     }
 
-    // -- 3. Persist the message (if present) --------------------------------
-    if (payload.message?.content) {
-      const direction = payload.message.direction ?? "inbound";
-      const timestamp = payload.message.timestamp
-        ? new Date(payload.message.timestamp).toISOString()
-        : new Date().toISOString();
+    // -- 3. Persist the message (if content provided) -----------------------
+    let messageId: string | undefined;
+    
+    if (content) {
+      // Prepare metadata with message_uuid for idempotency
+      const messageMetadata: Record<string, unknown> = {};
+      if (messageUuid) {
+        messageMetadata.message_uuid = messageUuid;
+      }
+      if (payload.metadata) {
+        Object.assign(messageMetadata, payload.metadata);
+      }
 
-      const { error: msgErr } = await supabase.from("messages").insert({
-        conversation_id: conversationId,
-        sender_type: direction === "outbound" ? "bot" : "customer",
-        content_type: "text",
-        content_text: payload.message.content,
-        created_at: timestamp,
-      });
+      const { data: msgData, error: msgErr } = await supabase
+        .from("messages")
+        .insert({
+          conversation_id: conversationId,
+          sender_type: senderType,
+          content_type: "text",
+          content_text: content,
+          created_at: timestamp,
+          metadata: Object.keys(messageMetadata).length > 0 ? messageMetadata : null,
+        })
+        .select("id")
+        .single();
+
       if (msgErr) {
         console.error("[n8n/event] message insert failed:", msgErr);
+      } else {
+        messageId = msgData.id;
       }
     }
 
@@ -323,11 +401,21 @@ export async function POST(request: Request) {
         .eq("id", conversationId);
     }
 
+    if (payload.event === "conversation_ended") {
+      await supabase
+        .from("conversations")
+        .update({ bot_active: false })
+        .eq("id", conversationId);
+    }
+
     return NextResponse.json({
       ok: true,
       conversation_id: conversationId,
       contact_id: contactId,
+      message_id: messageId,
+      sender_type: senderType,
     });
+
   } catch (err) {
     console.error("[n8n/event] unexpected error:", err);
     return NextResponse.json(

@@ -49,7 +49,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Conversación no encontrada' }, { status: 404 })
     }
 
-    const recipientId = conv.contacts?.external_id
+    const contacts = conv.contacts as unknown as { external_id: string }[] | { external_id: string } | null
+    const recipientId = Array.isArray(contacts) ? contacts[0]?.external_id : contacts?.external_id
     // Determinar si es texto o media
     const isMedia = !!media_url
     const igBody: Record<string, unknown> = {

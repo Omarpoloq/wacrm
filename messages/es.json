@@ -25,6 +25,7 @@
     "automations": "Automatizaciones",
     "flows": "Flujos",
     "aiAgents": "Agentes IA",
+    "n8nConfig": "Configuración n8n",
     "settings": "Ajustes",
     "beta": "Beta",
     "unreadConversations": "{count} conversación sin leer{count, plural, =1 {} other {es}}",
@@ -169,7 +170,9 @@
       "selectConversation": "Selecciona una conversación",
       "selectConversationHint": "Elige una conversación de la izquierda para empezar a chatear",
       "today": "Hoy",
-      "yesterday": "Ayer"
+      "yesterday": "Ayer",
+      "loadingMoreMessages": "Cargando más mensajes…",
+      "newMessages": "Mensajes nuevos"
     },
     "sessionTimer": {
       "expired": "Expirada",

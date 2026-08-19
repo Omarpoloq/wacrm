@@ -502,7 +502,7 @@ function InboxPageInner() {
   }, [router]);
 
 
-  const handleMessagesLoaded = useCallback((loaded: Message[]) => {
+  const handleMessagesLoaded = useCallback((loaded: Message[] | ((prev: Message[]) => Message[])) => {
     setMessages(loaded);
   }, []);
 
