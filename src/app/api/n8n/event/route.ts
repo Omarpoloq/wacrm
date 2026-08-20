@@ -371,6 +371,7 @@ export async function POST(request: Request) {
         .insert({
           conversation_id: conversationId,
           sender_type: senderType,
+          ai_generated: senderType === "bot",
           content_type: "text",
           content_text: content,
           created_at: timestamp,

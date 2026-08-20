@@ -153,6 +153,7 @@ export function MessageThread({
   const [hasMoreMessages, setHasMoreMessages] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const oldestMessageRef = useRef<string | null>(null);
+
   useEffect(() => {
     return () => {
       if (refreshTimerRef.current !== null) {
@@ -224,8 +225,48 @@ export function MessageThread({
   const conversationId = conversation?.id;
   const hasUnread = (conversation?.unread_count ?? 0) > 0;
 
+  // Scroll persistence keyed by conversationId
+  const scrollPositionRef = useRef<number>(0);
+  const scrollRestoredRef = useRef(false);
+
+  // Save scroll position to sessionStorage on scroll
+  const saveScrollPosition = useCallback(() => {
+    if (!conversationId || !scrollRef.current) return;
+    const scrollTop = scrollRef.current.scrollTop;
+    scrollPositionRef.current = scrollTop;
+    try {
+      sessionStorage.setItem(
+        `wacrm:scroll:${conversationId}`,
+        JSON.stringify({ scrollTop, timestamp: Date.now() }),
+      );
+    } catch {}
+  }, [conversationId]);
+
+  // Restore scroll position from sessionStorage after messages render
+  const restoreScrollPosition = useCallback(() => {
+    if (!conversationId || scrollRestoredRef.current || !scrollRef.current) return;
+    try {
+      const stored = sessionStorage.getItem(`wacrm:scroll:${conversationId}`);
+      if (stored) {
+        const { scrollTop } = JSON.parse(stored);
+        // Only restore if it's a reasonable position (not at bottom)
+        // and the scrollable area has content
+        const el = scrollRef.current;
+        if (scrollTop > 0 && scrollTop < el.scrollHeight - el.clientHeight) {
+          // Use requestAnimationFrame to wait for layout
+          requestAnimationFrame(() => {
+            el.scrollTop = scrollTop;
+            scrollPositionRef.current = scrollTop;
+          });
+        }
+      }
+    } catch {}
+    scrollRestoredRef.current = true;
+  }, [conversationId]);
+
   useEffect(() => {
-    if (!conversationId) return;
+    // Si ya hay mensajes, no recargamos al re-montar el componente
+    if (!conversationId || messages.length > 0) return;
 
     const supabase = createClient();
     let cancelled = false;
@@ -362,6 +403,8 @@ export function MessageThread({
 
   useEffect(() => {
     setReplyTo(null);
+    // Reset scroll restoration flag for new conversation
+    scrollRestoredRef.current = false;
   }, [conversationId]);
 
   useEffect(() => {
@@ -382,6 +425,21 @@ export function MessageThread({
       oldestMessageRef.current = messages[0].id;
     }
   }, [messages]);
+
+  // Restore scroll position once per conversation after messages load
+  // This runs after the initial load and when switching conversations
+  useEffect(() => {
+    if (conversationId && messages.length > 0) {
+      // Small delay to ensure DOM is rendered
+      const timer = setTimeout(() => {
+        restoreScrollPosition();
+      }, 0);
+      return () => clearTimeout(timer);
+    } else if (!conversationId) {
+      // Reset restoration flag when conversation changes
+      scrollRestoredRef.current = false;
+    }
+  }, [conversationId, messages.length, restoreScrollPosition]);
 
   // Load more messages when scrolling up
   const loadMoreMessages = useCallback(async () => {
@@ -424,7 +482,7 @@ export function MessageThread({
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    
+
     // Use requestAnimationFrame to wait for layout/image rendering
     requestAnimationFrame(() => {
       el.scrollTop = el.scrollHeight;
@@ -460,7 +518,7 @@ export function MessageThread({
   // Handle scroll for load more + track whether we're pinned to the bottom
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget;
-    const atBottom =
+    const atBottom = 
       target.scrollHeight - target.scrollTop - target.clientHeight < 40;
     isAtBottomRef.current = atBottom;
     if (atBottom && showNewMessagesBadge) {
@@ -469,7 +527,9 @@ export function MessageThread({
     if (target.scrollTop === 0 && hasMoreMessages && !loadingMore) {
       loadMoreMessages();
     }
-  }, [hasMoreMessages, loadingMore, loadMoreMessages, showNewMessagesBadge]);
+    // Persist scroll position for this conversation
+    saveScrollPosition();
+  }, [hasMoreMessages, loadingMore, loadMoreMessages, showNewMessagesBadge, saveScrollPosition]);
 
   // ============================================================
   // HANDLERS ADAPTADOS PARA AMBOS CANALES
@@ -896,8 +956,8 @@ export function MessageThread({
     );
   }
 
-  const displayName = contact.name || 
-  (conversation?.channel === 'instagram' ? contact.company ?? undefined : undefined) || 
+  const displayName = contact.name ||
+  (conversation?.channel === 'instagram' ? contact.company ?? undefined : undefined) ||
   contact.phone;
   const messageGroups = groupMessagesByDate(messages);
   const currentStatus = STATUS_OPTIONS.find(
@@ -1136,7 +1196,7 @@ export function MessageThread({
                       ? {
                           authorLabel:
                             parent.sender_type === "agent" || parent.sender_type === "bot"
-                              ? t("me") 
+                              ? t("me")
                               : contact?.name || contact?.phone || "Unknown",
                           preview: buildReplyPreview(parent, tQuote),
                         }
@@ -1214,7 +1274,7 @@ export function MessageThread({
         }}
       />
 
-      {/* COMPOSER — pasamos showTemplateButton solo si es WhatsApp */}
+      {/* COMPOSER - pasamos showTemplateButton solo si es WhatsApp */}
       <MessageComposer
         conversationId={conversation.id}
         sessionExpired={sessionInfo.expired}
