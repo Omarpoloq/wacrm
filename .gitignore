@@ -42,3 +42,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# supabase
+/supabase/.temp/
+# diff files
+diff_clean.sql
+diff_output*.txt
+diff_structural.sql

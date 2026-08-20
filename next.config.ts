@@ -82,6 +82,7 @@ const nextConfig: NextConfig = {
   allowedDevOrigins: [
     "*.ngrok-free.app",
     "*.ngrok.app",
+    'crm.solventaia.co',
     "*.ngrok.io",
     "*.trycloudflare.com",
     "*.loca.lt",
