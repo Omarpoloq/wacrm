@@ -31,6 +31,11 @@ interface WhatsAppStatus {
   connected: boolean;
 }
 
+interface InstagramStatus {
+  connected: boolean;
+  instagram_business_id: string | null;
+}
+
 export function SettingsOverview({
   onSelect,
 }: {
@@ -51,6 +56,9 @@ export function SettingsOverview({
   // from blanking the rest of the landing.
   const [whatsapp, setWhatsapp] = useState<WhatsAppStatus | null>(null);
   const [whatsappLoading, setWhatsappLoading] = useState(true);
+  // Instagram status — same shape as WhatsApp but uses its own endpoint.
+  const [instagram, setInstagram] = useState<InstagramStatus | null>(null);
+  const [instagramLoading, setInstagramLoading] = useState(true);
 
   useEffect(() => {
     if (!user || !accountId) return;
@@ -136,6 +144,21 @@ export function SettingsOverview({
       setWhatsappLoading(false);
     })();
 
+    // Instagram connection status — independent of WhatsApp so a slow
+    // Instagram fetch can't blank the WhatsApp tile (and vice versa).
+    (async () => {
+      setInstagramLoading(true);
+      const res = await fetch('/api/instagram/config', { cache: 'no-store' })
+        .then((r) => r.json())
+        .catch(() => null);
+      if (cancelled) return;
+      setInstagram({
+        connected: !!res?.connected,
+        instagram_business_id: res?.instagram_business_id ?? null,
+      });
+      setInstagramLoading(false);
+    })();
+
     return () => {
       cancelled = true;
     };
@@ -170,6 +193,17 @@ export function SettingsOverview({
       ) : (
         <>
           <StatusDot tone="muted" /> {t('needsReconnecting')}
+        </>
+      ),
+    },
+    {
+      section: 'instagram',
+      loading: instagramLoading,
+      subtitle: !instagram?.connected ? (
+        t('notSetup')
+      ) : (
+        <>
+          <StatusDot tone="ok" /> {t('connected')}
         </>
       ),
     },

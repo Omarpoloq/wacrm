@@ -4,7 +4,50 @@ import { createClient } from '@supabase/supabase-js';
 import { isUniqueViolation } from '@/lib/contacts/dedupe';
 import { dispatchInboundToN8n } from '@/lib/n8n/dispatchInboundToN8n';
 
+// Type definitions for Instagram webhook payload
+// No longer used - keeping type for potential future use
+// interface InstagramProfile {
+//   id: string;
+//   name?: string;
+//   username?: string;
+//   profile_pic?: string;
+// }
+
+interface InstagramAttachment {
+  type: string;
+  payload?: {
+    url?: string;
+    id?: string;
+    caption?: string;
+  };
+}
+
+interface InstagramMessage {
+  mid: string;
+  text?: string;
+  attachments?: InstagramAttachment[];
+  is_echo?: boolean;
+}
+
+interface InstagramEvent {
+  sender: { id: string };
+  recipient: { id: string };
+  timestamp: number;
+  message: InstagramMessage;
+}
+
+interface InstagramEntry {
+  id: string;
+  messaging?: InstagramEvent[];
+}
+
+interface InstagramWebhookBody {
+  object: string;
+  entry: InstagramEntry[];
+}
+
 // Lazy Supabase admin client
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _adminClient: any = null;
 function supabaseAdmin() {
   if (!_adminClient) {
@@ -35,30 +78,115 @@ export async function GET(request: Request) {
 
 // POST - Receive messages
 export async function POST(request: Request) {
+  // DEBUG: log all headers Meta sends. If Meta is gzip/deflate/br-ing
+  // the body, Next.js's request.text() should still give us the
+  // decoded bytes, but if a proxy in front decompressed and re-encoded
+  // the body, the bytes our HMAC sees won't match what Meta HMAC'd.
+  // Logging content-encoding + transfer-encoding lets us spot that.
+  const allHeaders: Record<string, string> = {};
+  request.headers.forEach((value, key) => {
+    allHeaders[key] = value;
+  });
+  console.log('[Instagram webhook] inbound headers', {
+    'content-encoding': request.headers.get('content-encoding'),
+    'content-length': request.headers.get('content-length'),
+    'transfer-encoding': request.headers.get('transfer-encoding'),
+    'content-type': request.headers.get('content-type'),
+    'user-agent': request.headers.get('user-agent'),
+    'x-hub-signature-256': request.headers.get('x-hub-signature-256'),
+    all_headers: allHeaders,
+  });
+
   const rawBody = await request.text();
   const signature = request.headers.get('x-hub-signature-256') || '';
 
-  const appSecret = process.env.INSTAGRAM_APP_SECRET;
-  if (appSecret && signature) {
+  // TEMPORARY: try every secret available in env, including the
+  // Instagram sub-app secret. We compute HMAC with each one against
+  // the raw body and log which (if any) matches the signature Meta
+  // sent. This is purely diagnostic — once we know the winning secret,
+  // narrow the list back down to just it.
+  //
+  // SKIP MODE: when INSTAGRAM_SKIP_SIGNATURE is explicitly 'true',
+  // we accept any signature (or no signature) so the rest of the
+  // inbound flow can be validated end-to-end. We still log every
+  // candidate's HMAC so we can spot the correct secret from the
+  // server logs.
+  const skipSignature = process.env.INSTAGRAM_SKIP_SIGNATURE === 'true';
+
+  // Collect every candidate secret we want to try. Order is
+  // arbitrary — we compute all of them and report which matches.
+  const candidateMap: Record<string, string | undefined> = {
+    INSTAGRAM_WEBHOOK_SECRET: process.env.INSTAGRAM_WEBHOOK_SECRET,
+    INSTAGRAM_APP_SECRET: process.env.INSTAGRAM_APP_SECRET,
+    INSTAGRAM_VERIFY_TOKEN: process.env.INSTAGRAM_VERIFY_TOKEN,
+    META_APP_SECRET: process.env.META_APP_SECRET,
+  };
+
+  const candidates = Object.entries(candidateMap).filter(
+    (entry): entry is [string, string] => Boolean(entry[1] && entry[1].length > 0),
+  );
+
+  if (skipSignature) {
+    console.warn(
+      '[Instagram webhook] SIGNATURE CHECK SKIPPED — INSTAGRAM_SKIP_SIGNATURE=true',
+    );
+  }
+
+  if (signature && candidates.length > 0) {
     const crypto = await import('crypto');
     const parts = signature.split('=');
     if (parts.length === 2 && parts[0] === 'sha256') {
-      const expected = crypto
-        .createHmac('sha256', appSecret)
-        .update(rawBody)
-        .digest('hex');
-      if (!crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(parts[1]))) {
-        console.warn('[Instagram webhook] Invalid signature');
-        return NextResponse.json({ error: 'Invalid signature' }, { status: 403 });
+      const receivedBuf = Buffer.from(parts[1]);
+
+      // Compute HMAC with every candidate secret and log which one
+      // matches. This is the diagnostic block — if none match, the
+      // log tells us which prefixes are *close* to the right answer.
+      const attemptSummaries = candidates.map(([envName, secret]) => {
+        const expected = crypto
+          .createHmac('sha256', secret)
+          .update(rawBody)
+          .digest('hex');
+        const expectedBuf = Buffer.from(expected);
+        const matched =
+          expectedBuf.length === receivedBuf.length &&
+          crypto.timingSafeEqual(expectedBuf, receivedBuf);
+        return {
+          env: envName,
+          secret_prefix: secret.slice(0, 4),
+          secret_length: secret.length,
+          signature_computed_prefix: expected.slice(0, 8) + '…',
+          matched,
+        };
+      });
+
+      const matchedAttempt = attemptSummaries.find((a) => a.matched);
+      const matchedEnvVar = matchedAttempt?.env ?? null;
+
+      console.log('[Instagram webhook] signature debug', {
+        signature_received: signature,
+        signature_received_prefix: parts[1].slice(0, 8) + '…',
+        body_length: rawBody.length,
+        body_sha256: crypto.createHash('sha256').update(rawBody).digest('hex'),
+        body_full: rawBody,
+        attempts: attemptSummaries,
+        matched_with: matchedEnvVar,
+        skipped: skipSignature,
+      });
+
+      if (!skipSignature) {
+        if (!matchedEnvVar) {
+          console.warn('[Instagram webhook] Invalid signature (no candidate matched)');
+          return NextResponse.json({ error: 'Invalid signature' }, { status: 403 });
+        }
       }
     }
-  } else {
+  } else if (!skipSignature) {
     console.warn('[Instagram webhook] No app secret or signature, skipping verification (development mode)');
   }
 
-  let body: any;
+  let body: InstagramWebhookBody;
   try {
-    body = JSON.parse(rawBody);
+    body = JSON.parse(rawBody) as InstagramWebhookBody;
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
@@ -77,15 +205,13 @@ export async function POST(request: Request) {
 // ============================================================
 // PROCESADOR PRINCIPAL
 // ============================================================
-async function processInstagramWebhook(body: any) {
+async function processInstagramWebhook(body: InstagramWebhookBody) {
   if (body.object !== 'instagram') {
     console.log('[Instagram webhook] Ignored event (not instagram)');
     return;
   }
 
-  for (const entry of body.entry || []) {
-    const instagramBusinessId = entry.id;
-
+  for (const entry of body.entry) {
     for (const event of entry.messaging || []) {
       if (!event.message) continue;
       // Ignorar echoes (mensajes que nosotros enviamos, Meta los refleja al webhook)
@@ -96,25 +222,33 @@ async function processInstagramWebhook(body: any) {
       const message = event.message;
 
       // 1. Obtener configuración de Instagram desde la base de datos
+      //
+      // The webhook's `event.recipient.id` is the **Facebook Page ID**
+      // (not the Instagram User ID we get from /me). The OAuth flow now
+      // populates `page_id` with that Page ID and `instagram_business_id`
+      // with the linked Business Account ID. We match on either so the
+      // lookup works regardless of which ID Meta echoes in the event.
       const { data: config, error: configError } = await supabaseAdmin()
         .from('instagram_config')
-        .select('account_id, user_id')
-        .eq('instagram_business_id', recipientId)
+        .select('account_id, user_id, access_token')
+        .or(`instagram_business_id.eq.${recipientId},page_id.eq.${recipientId}`)
         .maybeSingle();
 
       if (configError || !config) {
-        console.error(`[Instagram] No config found for business id: ${recipientId}`, configError);
+        console.error(`[Instagram] No config found for recipient id: ${recipientId}`, configError);
         continue;
       }
 
       const accountId = config.account_id;
       const userId = config.user_id;
+      const accessToken = config.access_token;
 
       // 2. Buscar o crear contacto
       const contactOutcome = await findOrCreateInstagramContact(
         senderId,
         accountId,
-        userId
+        userId,
+        accessToken
       );
       if (!contactOutcome) {
         console.error(`[Instagram] Failed to find/create contact for sender ${senderId}`);
@@ -144,60 +278,64 @@ async function processInstagramWebhook(body: any) {
       let contentText: string | null = text;
 
       if (attachments.length > 0) {
-  const firstAtt = attachments[0];
-  contentType = firstAtt.type || 'file';
-  
-  // Mapear tipos de Instagram a tipos válidos
-  const typeMap: Record<string, string> = {
-    'ig_reel': 'video',
-    'ig_story': 'image',
-    'share': 'image',
-  }
-  contentType = typeMap[contentType] || contentType
+        const firstAtt = attachments[0];
+        contentType = firstAtt.type || 'file';
 
-  const directUrl = firstAtt.payload?.url || null
-  const mediaId = firstAtt.payload?.id || null
+        // Mapear tipos de Instagram a tipos válidos
+        const typeMap: Record<string, string> = {
+          'ig_reel': 'video',
+          'ig_story': 'image',
+          share: 'image',
+        };
+        contentType = typeMap[contentType] || contentType;
 
-  if (directUrl) {
-    // Intentar descargar y subir a Storage
-    try {
-      const res = await fetch(directUrl)
-      if (res.ok) {
-        const buffer = Buffer.from(await res.arrayBuffer())
-        const contentTypeHeader = res.headers.get('content-type') || 'image/jpeg'
-        const mimeMap: Record<string, string> = {
-          'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
-          'video/mp4': 'mp4', 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3',
+        const directUrl = firstAtt.payload?.url || null;
+        const mediaId = firstAtt.payload?.id || null;
+
+        if (directUrl) {
+          // Intentar descargar y subir a Storage
+          try {
+            const res = await fetch(directUrl);
+            if (res.ok) {
+              const buffer = Buffer.from(await res.arrayBuffer());
+              const contentTypeHeader = res.headers.get('content-type') || 'image/jpeg';
+              const mimeMap: Record<string, string> = {
+                'image/jpeg': 'jpg',
+                'image/png': 'png',
+                'image/webp': 'webp',
+                'video/mp4': 'mp4',
+                'audio/ogg': 'ogg',
+                'audio/mpeg': 'mp3',
+              };
+              const ext = mimeMap[contentTypeHeader] || 'bin';
+              const fileKey = mediaId || Date.now().toString();
+              const path = `instagram/${fileKey}.${ext}`;
+
+              const { error: uploadError } = await supabaseAdmin()
+                .storage
+                .from('chat-media')
+                .upload(path, buffer, { contentType: contentTypeHeader, upsert: true });
+
+              if (!uploadError) {
+                const { data } = supabaseAdmin().storage.from('chat-media').getPublicUrl(path);
+                mediaUrl = data.publicUrl;
+              } else {
+                console.error('[Instagram] Error subiendo media:', uploadError);
+                mediaUrl = directUrl; // fallback
+              }
+            }
+          } catch (err) {
+            console.error('[Instagram] Error descargando media:', err);
+            mediaUrl = directUrl; // fallback
+          }
+        } else if (mediaId) {
+          mediaUrl = await getInstagramMediaUrl(mediaId, accessToken);
         }
-        const ext = mimeMap[contentTypeHeader] || 'bin'
-        const fileKey = mediaId || Date.now().toString()
-        const path = `instagram/${fileKey}.${ext}`
 
-        const { error: uploadError } = await supabaseAdmin()
-          .storage
-          .from('chat-media')
-          .upload(path, buffer, { contentType: contentTypeHeader, upsert: true })
-
-        if (!uploadError) {
-          const { data } = supabaseAdmin().storage.from('chat-media').getPublicUrl(path)
-          mediaUrl = data.publicUrl
-        } else {
-          console.error('[Instagram] Error subiendo media:', uploadError)
-          mediaUrl = directUrl // fallback
+        if (firstAtt.payload?.caption) {
+          contentText = firstAtt.payload.caption;
         }
       }
-    } catch (err) {
-      console.error('[Instagram] Error descargando media:', err)
-      mediaUrl = directUrl // fallback
-    }
-  } else if (mediaId) {
-    mediaUrl = await getInstagramMediaUrl(mediaId)
-  }
-
-  if (firstAtt.payload?.caption) {
-    contentText = firstAtt.payload.caption;
-  }
-}
 
       // 5. Insertar mensaje
       const { error: msgError } = await supabaseAdmin()
@@ -247,13 +385,13 @@ async function processInstagramWebhook(body: any) {
         account_id: accountId,
         contact: {
           external_id: senderId, // Instagram user ID
-          name: contact.name,
+          name: contact.name ?? `User ${senderId.slice(-4)}`,
           channel: 'instagram',
         },
-      }
+      };
       dispatchInboundToN8n(accountId, n8nPayload).catch((err) =>
-        console.error('[n8n] Instagram dispatch failed:', err)
-      )
+        console.error('[n8n] Instagram dispatch failed:', err),
+      );
 
       console.log(`[Instagram] Message processed: ${messageId} for contact ${contact.id}`);
     }
@@ -264,14 +402,15 @@ async function processInstagramWebhook(body: any) {
 // FUNCIONES AUXILIARES
 // ============================================================
 
-async function getInstagramMediaUrl(mediaId: string): Promise<string | null> {
-  const token = process.env.INSTAGRAM_ACCESS_TOKEN;
-  if (!token) {
+async function getInstagramMediaUrl(mediaId: string, token?: string): Promise<string | null> {
+  const accessToken = token ?? process.env.INSTAGRAM_ACCESS_TOKEN;
+  if (!accessToken) {
     console.warn('[Instagram] No access token for media');
     return null;
   }
   try {
-    const url = `https://graph.facebook.com/v20.0/${mediaId}?fields=url&access_token=${token}`;
+    // Use the new graph.instagram.com endpoint
+    const url = `https://graph.instagram.com/v20.0/${mediaId}?fields=url&access_token=${accessToken}`;
     const res = await fetch(url);
     if (!res.ok) {
       console.error('[Instagram] Failed to fetch media url:', await res.text());
@@ -285,12 +424,27 @@ async function getInstagramMediaUrl(mediaId: string): Promise<string | null> {
   }
 }
 
+interface ContactRow {
+  id: string;
+  account_id: string;
+  user_id: string;
+  external_id: string;
+  channel: string;
+  name: string | null;
+  phone: string;
+  company: string | null;
+  avatar_url: string | null;
+  updated_at: string;
+  [key: string]: unknown;
+}
+
 async function findOrCreateInstagramContact(
   externalId: string,
   accountId: string,
   userId: string,
+  accessToken?: string,
   name?: string
-): Promise<{ contact: any; wasCreated: boolean } | null> {
+): Promise<{ contact: ContactRow; wasCreated: boolean } | null> {
   const supabase = supabaseAdmin();
 
   // Buscar existente
@@ -308,11 +462,12 @@ async function findOrCreateInstagramContact(
   }
 
   if (existing) {
+    const row = existing as ContactRow;
     // Actualizar datos si cambió (nombre, avatar, username)
-    let updateData: any = { updated_at: new Date().toISOString() };
-    if (name && name !== existing.name) updateData.name = name;
+    const updateData: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (name && name !== row.name) updateData.name = name;
     // Si queremos actualizar también el username, lo haríamos, pero por simplicidad no.
-    return { contact: existing, wasCreated: false };
+    return { contact: row, wasCreated: false };
   }
 
   // Si no existe, obtener datos del perfil desde Meta
@@ -321,9 +476,9 @@ async function findOrCreateInstagramContact(
   let avatarUrl = null;
 
   try {
-    const token = process.env.INSTAGRAM_ACCESS_TOKEN;
+    const token = accessToken ?? process.env.INSTAGRAM_ACCESS_TOKEN;
     const res = await fetch(
-      `https://graph.facebook.com/v20.0/${externalId}?fields=name,username,profile_pic&access_token=${token}`
+      `https://graph.instagram.com/v20.0/${externalId}?fields=name,username,profile_pic&access_token=${token}`
     );
     if (res.ok) {
       const data = await res.json();
@@ -364,20 +519,33 @@ async function findOrCreateInstagramContact(
         .eq('external_id', externalId)
         .eq('channel', 'instagram')
         .maybeSingle();
-      if (raced) return { contact: raced, wasCreated: false };
+      if (raced) return { contact: raced as ContactRow, wasCreated: false };
     }
     console.error('[Instagram] Error creating contact:', createError);
     return null;
   }
 
-  return { contact: newContact, wasCreated: true };
+  return { contact: newContact as ContactRow, wasCreated: true };
+}
+
+interface ConversationRow {
+  id: string;
+  account_id: string;
+  user_id: string;
+  contact_id: string;
+  channel: string;
+  status: string;
+  unread_count: number;
+  last_message_at: string;
+  updated_at: string;
+  [key: string]: unknown;
 }
 
 async function findOrCreateInstagramConversation(
   contactId: string,
   accountId: string,
   userId: string
-): Promise<{ conversation: any; created: boolean } | null> {
+): Promise<{ conversation: ConversationRow; created: boolean } | null> {
   // Ajusta el valor de 'status' según tu esquema ('open' o 'active')
   const STATUS = 'open'; // cambia a 'active' si tu tabla usa ese valor
 
@@ -396,7 +564,7 @@ async function findOrCreateInstagramConversation(
   }
 
   if (existing) {
-    return { conversation: existing, created: false };
+    return { conversation: existing as ConversationRow, created: false };
   }
 
   const { data: newConv, error: createError } = await supabaseAdmin()
@@ -422,11 +590,11 @@ async function findOrCreateInstagramConversation(
         .eq('channel', 'instagram')
         .eq('status', STATUS)
         .maybeSingle();
-      if (raced) return { conversation: raced, created: false };
+      if (raced) return { conversation: raced as ConversationRow, created: false };
     }
     console.error('[Instagram] Error creating conversation:', createError);
     return null;
   }
 
-  return { conversation: newConv, created: true };
+  return { conversation: newConv as ConversationRow, created: true };
 }

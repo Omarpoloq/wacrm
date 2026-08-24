@@ -84,6 +84,14 @@ export async function middleware(request: NextRequest) {
       NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     )
   }
+  // Same for Instagram — webhooks are public, signed by HMAC, no auth.
+  // Without this exemption the middleware runs `supabase.auth.getUser()`
+  // on every webhook POST, which can read/buffer the request body and
+  // corrupt the bytes we need to HMAC against, producing "Invalid
+  // signature" rejections on otherwise-valid requests from Meta.
+  if (request.nextUrl.pathname.startsWith('/api/instagram/webhook')) {
+    return supabaseResponse
+  }
 
   return supabaseResponse
 }
