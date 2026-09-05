@@ -87,7 +87,8 @@ export async function POST(request: Request) {
   request.headers.forEach((value, key) => {
     allHeaders[key] = value;
   });
-  console.log('[Instagram webhook] inbound headers', {
+  
+ /* console.log('[Instagram webhook] inbound headers', {
     'content-encoding': request.headers.get('content-encoding'),
     'content-length': request.headers.get('content-length'),
     'transfer-encoding': request.headers.get('transfer-encoding'),
@@ -95,7 +96,7 @@ export async function POST(request: Request) {
     'user-agent': request.headers.get('user-agent'),
     'x-hub-signature-256': request.headers.get('x-hub-signature-256'),
     all_headers: allHeaders,
-  });
+  }); */
 
   const rawBody = await request.text();
   const signature = request.headers.get('x-hub-signature-256') || '';
@@ -162,16 +163,7 @@ export async function POST(request: Request) {
       const matchedAttempt = attemptSummaries.find((a) => a.matched);
       const matchedEnvVar = matchedAttempt?.env ?? null;
 
-      console.log('[Instagram webhook] signature debug', {
-        signature_received: signature,
-        signature_received_prefix: parts[1].slice(0, 8) + '…',
-        body_length: rawBody.length,
-        body_sha256: crypto.createHash('sha256').update(rawBody).digest('hex'),
-        body_full: rawBody,
-        attempts: attemptSummaries,
-        matched_with: matchedEnvVar,
-        skipped: skipSignature,
-      });
+     
 
       if (!skipSignature) {
         if (!matchedEnvVar) {
@@ -393,7 +385,7 @@ async function processInstagramWebhook(body: InstagramWebhookBody) {
         console.error('[n8n] Instagram dispatch failed:', err),
       );
 
-      console.log(`[Instagram] Message processed: ${messageId} for contact ${contact.id}`);
+     // console.log(`[Instagram] Message processed: ${messageId} for contact ${contact.id}`);
     }
   }
 }

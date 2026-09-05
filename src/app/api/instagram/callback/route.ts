@@ -137,7 +137,7 @@ export async function GET(request: Request) {
     const dialogUrl =
       `${INSTAGRAM_OAUTH_DIALOG}` +
       `?force_reauth=true` +
-      `&client_id=1041455398470581` +
+      `&client_id=${appId}` +
       `&redirect_uri=https://crm.solventaia.co/api/instagram/callback` +
       `&response_type=code` +
       `&scope=instagram_business_basic%2Cinstagram_business_manage_messages%2Cinstagram_business_manage_comments%2Cinstagram_business_content_publish%2Cinstagram_business_manage_insights` +
